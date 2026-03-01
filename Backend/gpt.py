@@ -1,7 +1,7 @@
 import re
 import os
 import json
-from ollama import Client, ResponseError
+import requests
 
 from dotenv import load_dotenv
 from logstream import log
@@ -11,132 +11,124 @@ from utils import ENV_FILE
 # Load environment variables
 load_dotenv(ENV_FILE)
 
-# Set environment variables
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").rstrip("/")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
-OLLAMA_TIMEOUT = float(os.getenv("OLLAMA_TIMEOUT", "180"))
+# Groq Configuration
+GROQ_API_KEY   = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL     = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+
+# Fallback: Gemini
+GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY", "")
+GEMINI_MODEL   = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-lite")
+
+# Fallback: OpenRouter
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL   = "mistralai/mistral-7b-instruct:free"
 
 
-def _ollama_client() -> Client:
-    return Client(host=OLLAMA_BASE_URL, timeout=OLLAMA_TIMEOUT)
+def _call_groq(prompt: str) -> str:
+    if not GROQ_API_KEY:
+        raise ValueError("GROQ_API_KEY tidak diset di .env")
+
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {GROQ_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": GROQ_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.8,
+        "max_tokens": 1024,
+    }
+
+    resp = requests.post(url, json=payload, headers=headers, timeout=60)
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"]
 
 
-def _extract_model_name(model_obj) -> str:
-    if hasattr(model_obj, "model") and getattr(model_obj, "model"):
-        return str(getattr(model_obj, "model")).strip()
-    if hasattr(model_obj, "name") and getattr(model_obj, "name"):
-        return str(getattr(model_obj, "name")).strip()
-    if isinstance(model_obj, dict):
-        return str(model_obj.get("model") or model_obj.get("name") or "").strip()
-    return ""
+def _call_gemini(prompt: str) -> str:
+    if not GEMINI_API_KEY:
+        raise ValueError("GOOGLE_API_KEY tidak diset di .env")
+
+    url = (
+        f"https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{GEMINI_MODEL}:generateContent?key={GEMINI_API_KEY}"
+    )
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.8, "maxOutputTokens": 1024},
+    }
+
+    resp = requests.post(url, json=payload, timeout=60)
+    resp.raise_for_status()
+    return resp.json()["candidates"][0]["content"]["parts"][0]["text"]
 
 
-def list_ollama_models() -> Tuple[List[str], str]:
+def _call_openrouter(prompt: str) -> str:
+    if not OPENROUTER_API_KEY:
+        raise ValueError("OPENROUTER_API_KEY tidak diset di .env")
+
+    url = "https://openrouter.ai/api/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/FujiwaraChoki/MoneyPrinter",
+        "X-Title": "MoneyPrinter",
+    }
+    payload = {
+        "model": OPENROUTER_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.8,
+        "max_tokens": 1024,
+    }
+
+    resp = requests.post(url, json=payload, headers=headers, timeout=60)
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"]
+
+
+def generate_response(prompt: str, ai_model: str = "") -> str:
     """
-    Returns available Ollama model names and configured default model.
-
-    Returns:
-        Tuple[List[str], str]: (available model names, default model)
+    Generate a response using Groq (primary) with fallback to Gemini and OpenRouter.
     """
-    try:
-        response = _ollama_client().list()
-    except Exception as err:
-        raise RuntimeError(f"Failed to fetch Ollama models: {err}") from err
+    providers = [
+        ("Groq",       _call_groq),
+        ("Gemini",     _call_gemini),
+        ("OpenRouter", _call_openrouter),
+    ]
 
-    models = []
-    if hasattr(response, "models") and getattr(response, "models") is not None:
-        models = list(getattr(response, "models"))
-    elif isinstance(response, dict):
-        models = response.get("models") or []
-
-    model_names = [_extract_model_name(model) for model in models]
-    model_names = [name for name in model_names if name]
-
-    unique_names = list(dict.fromkeys(model_names))
-
-    if OLLAMA_MODEL and OLLAMA_MODEL in unique_names:
-        default_model = OLLAMA_MODEL
-    elif unique_names:
-        default_model = unique_names[0]
-    else:
-        default_model = OLLAMA_MODEL if OLLAMA_MODEL else ""
-
-    return unique_names, default_model
-
-
-def generate_response(prompt: str, ai_model: str) -> str:
-    """
-    Generate a script for a video, depending on the subject of the video.
-
-    Args:
-        video_subject (str): The subject of the video.
-        ai_model (str): The AI model to use for generation.
-
-
-    Returns:
-
-        str: The response from the AI model.
-
-    """
-
-    model_name = (ai_model or "").strip() or OLLAMA_MODEL
-
-    try:
-        client = _ollama_client()
+    last_error = None
+    for name, fn in providers:
         try:
-            response = client.chat(
-                model=model_name,
-                messages=[{"role": "user", "content": prompt}],
-                stream=False,
-            )
-        except ResponseError as err:
-            if err.status_code == 404:
-                try:
-                    response = client.generate(
-                        model=model_name, prompt=prompt, stream=False
-                    )
-                except ResponseError as fallback_err:
-                    if (
-                        fallback_err.status_code == 404
-                        and "not found" in str(fallback_err).lower()
-                    ):
-                        available_models, _ = list_ollama_models()
-                        available = (
-                            ", ".join(available_models) if available_models else "none"
-                        )
-                        raise RuntimeError(
-                            f"Ollama model '{model_name}' is not installed. Available models: {available}. "
-                            f"Install it with: ollama pull {model_name}"
-                        ) from fallback_err
-                    raise
-            else:
-                raise
-    except RuntimeError:
-        raise
-    except Exception as err:
-        raise RuntimeError(f"Failed to connect to Ollama: {err}") from err
+            log(f"[AI] Mencoba {name}...", "info")
+            result = fn(prompt)
+            if result and result.strip():
+                log(f"[AI] {name} berhasil!", "success")
+                return result.strip()
+        except ValueError as e:
+            log(f"[AI] {name} dilewati: {e}", "warning")
+            continue
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response else "?"
+            log(f"[AI] {name} HTTP {status}: {e}", "error")
+            last_error = e
+            if status == 429:
+                log(f"[AI] Quota {name} habis, pindah provider...", "warning")
+            continue
+        except Exception as e:
+            log(f"[AI] {name} error: {e}", "error")
+            last_error = e
+            continue
 
-    content = ""
-    if hasattr(response, "message") and getattr(response, "message") is not None:
-        message = getattr(response, "message")
-        if hasattr(message, "content") and getattr(message, "content"):
-            content = str(getattr(message, "content")).strip()
-        elif isinstance(message, dict):
-            content = str(message.get("content") or "").strip()
+    raise RuntimeError(
+        f"Semua AI provider gagal. Error terakhir: {last_error}\n"
+        "Pastikan minimal satu API key diset di .env:\n"
+        "  GROQ_API_KEY, GOOGLE_API_KEY, atau OPENROUTER_API_KEY"
+    )
 
-    if not content:
-        if hasattr(response, "response") and getattr(response, "response"):
-            content = str(getattr(response, "response")).strip()
-        elif isinstance(response, dict):
-            content = (
-                str(response.get("message", {}).get("content") or "")
-                or str(response.get("response") or "")
-            ).strip()
 
-    if not content:
-        raise RuntimeError("Ollama returned an empty response.")
-
-    return content
+# Kept for compatibility — tidak dipakai tapi jangan dihapus
+def list_ollama_models() -> Tuple[List[str], str]:
+    return (["groq/llama-3.3-70b-versatile"], "groq/llama-3.3-70b-versatile")
 
 
 def generate_script(
@@ -146,29 +138,7 @@ def generate_script(
     voice: str,
     customPrompt: str,
 ) -> Optional[str]:
-    """
-    Generate a script for a video, depending on the subject of the video, the number of paragraphs, and the AI model.
-
-
-
-    Args:
-
-        video_subject (str): The subject of the video.
-
-        paragraph_number (int): The number of paragraphs to generate.
-
-        ai_model (str): The AI model to use for generation.
-
-
-
-    Returns:
-
-        str: The script for the video.
-
-    """
-
     # Build prompt
-
     if customPrompt:
         prompt = customPrompt
     else:
@@ -205,53 +175,26 @@ def generate_script(
 
     log(response, "info")
 
-    # Return the generated script
     if response:
-        # Clean the script
-        # Remove asterisks, hashes
         response = response.replace("*", "")
         response = response.replace("#", "")
-
-        # Remove markdown syntax
         response = re.sub(r"\[.*\]", "", response)
         response = re.sub(r"\(.*\)", "", response)
 
-        # Split the script into paragraphs
         paragraphs = response.split("\n\n")
-
-        # Select the specified number of paragraphs
         selected_paragraphs = paragraphs[:paragraph_number]
-
-        # Join the selected paragraphs into a single string
         final_script = "\n\n".join(selected_paragraphs)
 
-        # Print to console the number of paragraphs used
         log(f"Number of paragraphs used: {len(selected_paragraphs)}", "success")
-
         return final_script
     else:
-        log("[-] GPT returned an empty response.", "error")
+        log("[-] AI returned an empty response.", "error")
         return None
 
 
 def get_search_terms(
     video_subject: str, amount: int, script: str, ai_model: str
 ) -> List[str]:
-    """
-    Generate a JSON-Array of search terms for stock videos,
-    depending on the subject of a video.
-
-    Args:
-        video_subject (str): The subject of the video.
-        amount (int): The amount of search terms to generate.
-        script (str): The script of the video.
-        ai_model (str): The AI model to use for generation.
-
-    Returns:
-        List[str]: The search terms for the video subject.
-    """
-
-    # Build prompt
     prompt = f"""
     Generate {amount} search terms for stock videos,
     depending on the subject of a video.
@@ -275,11 +218,9 @@ def get_search_terms(
     {script}
     """
 
-    # Generate search terms
     response = generate_response(prompt, ai_model)
     log(response, "info")
 
-    # Parse response into a list of search terms
     search_terms = []
 
     try:
@@ -290,9 +231,8 @@ def get_search_terms(
             raise ValueError("Response is not a list of strings.")
 
     except (json.JSONDecodeError, ValueError):
-        log("[*] GPT returned an unformatted response. Attempting to clean...", "warning")
+        log("[*] AI returned an unformatted response. Attempting to clean...", "warning")
 
-        # Attempt to extract JSON array first
         match = re.search(r"\[[\s\S]*\]", response)
         if match:
             try:
@@ -300,52 +240,28 @@ def get_search_terms(
             except json.JSONDecodeError:
                 search_terms = []
 
-        # Last-resort fallback: collect quoted strings
         if not search_terms:
             search_terms = re.findall(r'"([^"\\]*(?:\\.[^"\\]*)*)"', response)
             search_terms = [term.strip() for term in search_terms if term.strip()]
 
-    # Let user know
     log(f"\nGenerated {len(search_terms)} search terms: {', '.join(search_terms)}", "info")
-
-    # Return search terms
     return search_terms
 
 
 def generate_metadata(
     video_subject: str, script: str, ai_model: str
 ) -> Tuple[str, str, List[str]]:
-    """
-    Generate metadata for a YouTube video, including the title, description, and keywords.
-
-    Args:
-        video_subject (str): The subject of the video.
-        script (str): The script of the video.
-        ai_model (str): The AI model to use for generation.
-
-    Returns:
-        Tuple[str, str, List[str]]: The title, description, and keywords for the video.
-    """
-
-    # Build prompt for title
     title_prompt = f"""  
     Generate a catchy and SEO-friendly title for a YouTube shorts video about {video_subject}.  
     """
-
-    # Generate title
     title = generate_response(title_prompt, ai_model).strip()
 
-    # Build prompt for description
     description_prompt = f"""  
     Write a brief and engaging description for a YouTube shorts video about {video_subject}.  
     The video is based on the following script:  
     {script}  
     """
-
-    # Generate description
     description = generate_response(description_prompt, ai_model).strip()
-
-    # Generate keywords
     keywords = get_search_terms(video_subject, 6, script, ai_model)
 
     return title, description, keywords
