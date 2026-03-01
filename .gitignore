@@ -1,20 +1,81 @@
-__pycache__
+# ==============================
+# MoneyPrinter .gitignore
+# ==============================
+
+# Environment & Secrets
 .env
-temp/*
-sounds/*
-output/*
-images/*
-*.zip
-*.srt
+.env.local
+.env.production
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+eggs/
+parts/
+var/
+sdist/
+develop-eggs/
+.installed.cfg
+lib/
+lib64/
+.venv/
+venv/
+ENV/
+env/
+
+# Virtual Environment (uv)
+.venv/
+uv.lock
+
+# Output Videos (jangan upload ke git!)
+Backend/temp/
+Backend/output/
 *.mp4
 *.mp3
-.history
-subtitles/*
-/venv
-.venv
-client_secret.json
-main.py-oauth2.json
+*.wav
+*.srt
+
+# OAuth & Credentials
+*.json
+!package.json
+!tsconfig.json
+client_secret*.json
+*-oauth2.json
+token.json
+
+# Logs
+*.log
+logs/
+
+# OS Files
 .DS_Store
-Backend/output*
-Songs/
-venv/
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Cache
+.cache/
+.pytest_cache/
+.mypy_cache/

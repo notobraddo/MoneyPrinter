@@ -13,7 +13,7 @@ dependencies = [
     "curl-cffi",
     "flask-cors==4.0.0",
     "playsound==1.2.2",
-    "pillow==9.5.0",
+    "pillow>=10.0.0",
     "python-dotenv==1.0.0",
     "srt-equalizer==0.1.8",
     "platformdirs==4.1.0",
